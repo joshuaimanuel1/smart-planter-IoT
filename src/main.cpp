@@ -1,6 +1,9 @@
 /**
  * SMART INDOOR PLANTER - ESP32
  * 
+ * Notes (IDE)
+ * Dikembangkan dan dikompilasi menggunakan Visual Studio Code (VS Code) 
+ * dengan ekstensi PlatformIO.
  * Fitur Utama:
  * 1. Otomasi Pompa Air (berdasarkan sensor kelembapan tanah dengan Hysteresis)
  * 2. Otomasi Grow Light (berdasarkan sensor LDR dengan Hysteresis)
