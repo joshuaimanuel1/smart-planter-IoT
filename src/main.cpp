@@ -238,7 +238,7 @@ void loop() {
           aiOk = resDoc["aiOk"] | false;
 
           // MANUAL: ikuti saklar pengguna. AUTO: ikuti AI HANYA bila model benar-benar menjawab;
-          // jika tidak (layanan Python mati), jatuh ke aturan lokal di bagian FALLBACK di bawah.
+          // jika tidak (layanan Python mati), akan jatuh ke aturan lokal di bagian FALLBACK di bawah.
           if (modeKontrol == "MANUAL" || aiOk) {
             pompaNyala = resDoc["pumpOn"] | false;
             lampuNyala = resDoc["growlightOn"] | false;
