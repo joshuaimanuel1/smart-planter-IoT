@@ -8,13 +8,10 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// // ================= KONFIGURASI JARINGAN =================
-// const char* ssid       = "TP-Link_96F2";
-// const char* password   = "89508367";
-// const char* serverUrl  = "http://192.168.0.100:4000/api/telemetry";
-const char* ssid       = "Jojo";
-const char* password   = "Jojoo1234";
-const char* serverUrl  = "http://172.20.10.5:4000/api/telemetry"; 
+// ================= KONFIGURASI JARINGAN =================
+const char* ssid       = "TP-Link_96F2";
+const char* password   = "89508367";
+const char* serverUrl  = "http://192.168.0.100:4000/api/telemetry";
 
 // ================= DEFINISI PIN =================
 #define DHT_PIN         4
@@ -57,6 +54,12 @@ DallasTemperature sensorSuhuTanah(&oneWire);
 bool pompaNyala = false;
 bool lampuNyala = false;
 String modeKontrol = "AUTO";
+int tanahTerakhirValid = 50; // Menyimpan nilai valid terakhir untuk mencegah glitch 0%
+
+// Keputusan ATURAN (rule-based Assignment 2) dihitung PARALEL di setiap siklus.
+// Fungsinya: (a) cadangan jika AI/server tidak tersedia, (b) pembanding AI vs Rule (dikirim ke server).
+bool pompaRule = false;
+bool lampuRule = false;
 
 // Variabel untuk Non-Blocking Timer (millis)
 unsigned long waktuSebelumnya = 0;
@@ -81,13 +84,51 @@ int bacaTanahPersen() {
   digitalWrite(SOIL_PWR, LOW);      
   int raw    = total / 10;
   int persen = map(raw, SOIL_DRY, SOIL_WET, 0, 100);
-  return constrain(persen, 0, 100);
+  persen = constrain(persen, 0, 100);
+
+  // Filter glitch: jika tiba-tiba 0% padahal sebelumnya basah, gunakan nilai valid terakhir
+  if (persen == 0 && tanahTerakhirValid > 15) {
+    return tanahTerakhirValid;
+  }
+  if (persen > 0) {
+    tanahTerakhirValid = persen;
+  }
+  return persen;
 }
 
 const char *statusTanah(int persen) {
   if (persen < BATAS_POMPA_ON)   return "KERING";
   if (persen <= BATAS_POMPA_OFF) return "LEMBAB";
   return "BASAH";
+}
+
+void terapkanAktuatorFisik() {
+  digitalWrite(RELAY_PUMP_PIN, pompaNyala ? PUMP_LEVEL_ON : PUMP_LEVEL_OFF);
+  digitalWrite(RELAY_LIGHT_PIN, lampuNyala ? LIGHT_LEVEL_ON : LIGHT_LEVEL_OFF);
+}
+
+// Hitung keputusan aturan (histeresis). TIDAK menyentuh relay.
+void hitungRuleBased(int tanah, int ldrPersen, float uvIndex) {
+  // Hanya nyalakan pompa jika tanah benar-benar kering (> 0% untuk hindari glitch sensor lepas)
+  if (tanah > 0 && tanah < BATAS_POMPA_ON) {
+    pompaRule = true;
+  } else if (tanah > BATAS_POMPA_OFF) {
+    pompaRule = false;
+  }
+
+  // Logika Dynamic UV & Cahaya
+  if (uvIndex >= 6.0 || ldrPersen > BATAS_LDR_OFF) {
+    lampuRule = false;
+  } else if (ldrPersen < BATAS_LDR_ON && uvIndex < 4.0) {
+    lampuRule = true;
+  }
+}
+
+// Cadangan: pakai keputusan aturan untuk menggerakkan relay.
+void jalankanFallbackRuleBased() {
+  pompaNyala = pompaRule;
+  lampuNyala = lampuRule;
+  terapkanAktuatorFisik();
 }
 
 // ================= SETUP =================
@@ -129,7 +170,7 @@ void setup() {
   tampilBaris(1, "WiFi Connected");
   delay(2000);
   lcd.clear();
-  Serial.println("=== SISTEM OTOMASI SMART INDOOR PLANTER AKTIF ===");
+  Serial.println("=== SISTEM AIoT SMART INDOOR PLANTER AKTIF ===");
 }
 
 // ================= LOOP UTAMA =================
@@ -147,7 +188,7 @@ void loop() {
     sensorSuhuTanah.requestTemperatures(); 
     float suhuTanahRaw = sensorSuhuTanah.getTempCByIndex(0);
     bool suhuTanahValid = (suhuTanahRaw != DEVICE_DISCONNECTED_C) && (suhuTanahRaw > -10.0) && (suhuTanahRaw < 60.0);
-    float suhuTanah = suhuTanahValid ? suhuTanahRaw : 0.0;
+    float suhuTanah = suhuTanahValid ? suhuTanahRaw : 25.0;
     
     int   ldrRaw     = analogRead(LDR_PIN);
     int   ldrPersen  = constrain(map(ldrRaw, 4095, 0, 0, 100), 0, 100);
@@ -155,29 +196,17 @@ void loop() {
     int   uvRaw      = analogRead(UV_PIN);
     float uvIndex    = ((uvRaw * 3.3) / 4095.0) / 0.1; 
 
-    // 2 & 3. LOGIKA KONTROL OTOMATIS (Hanya jika Mode Kontrol = AUTO)
-    if (modeKontrol == "AUTO") {
-      // Logika Pompa Air
-      if (tanah < BATAS_POMPA_ON) {
-        pompaNyala = true;
-      } else if (tanah > BATAS_POMPA_OFF) {
-        pompaNyala = false;
-      }
-      digitalWrite(RELAY_PUMP_PIN, pompaNyala ? PUMP_LEVEL_ON : PUMP_LEVEL_OFF);
+    // Aturan dihitung setiap siklus (juga saat AI aktif) supaya bisa dibandingkan dengan keputusan AI.
+    hitungRuleBased(tanah, ldrPersen, uvIndex);
 
-      // Logika Dynamic UV & Cahaya 
-      if (uvIndex >= 6.0 || ldrPersen > BATAS_LDR_OFF) {
-        lampuNyala = false;
-      } else if (ldrPersen < BATAS_LDR_ON && uvIndex < 4.0) {
-        lampuNyala = true;
-      }
-      digitalWrite(RELAY_LIGHT_PIN, lampuNyala ? LIGHT_LEVEL_ON : LIGHT_LEVEL_OFF);
-    }
+    bool kontrolServerBerhasil = false; // true = relay dikendalikan AI (AUTO) atau saklar pengguna (MANUAL)
+    bool aiOk = false;                  // true = server melaporkan model ML benar-benar menjawab
 
-    // 4. TELEMETRI HTTP POST & SINKRONISASI MANUAL
+    // 2. TELEMETRI HTTP POST & PENERIMAAN KEPUTUSAN AI / MANUAL DARI SERVER
     if (WiFi.status() == WL_CONNECTED) {
       HTTPClient http;
       http.begin(serverUrl);
+      http.setTimeout(1500); // Timeout 1.5 detik agar loop tidak macet jika jaringan lambat
       http.addHeader("Content-Type", "application/json");
 
       JsonDocument doc; 
@@ -192,36 +221,56 @@ void loop() {
       doc["pumpOn"] = pompaNyala;
       doc["growlightOn"] = lampuNyala;
       doc["mode"] = modeKontrol;
+      doc["pumpRule"] = pompaRule;
+      doc["lightRule"] = lampuRule;
 
       String jsonPayload;
       serializeJson(doc, jsonPayload);
 
       int httpResponseCode = http.POST(jsonPayload);
-      if (httpResponseCode > 0) {
+      if (httpResponseCode == 200) {
         String response = http.getString();
         JsonDocument resDoc;
         if (!deserializeJson(resDoc, response)) {
           const char* modeServer = resDoc["mode"] | "AUTO";
           modeKontrol = String(modeServer);
           
-          if (modeKontrol == "MANUAL") {
+          aiOk = resDoc["aiOk"] | false;
+
+          // MANUAL: ikuti saklar pengguna. AUTO: ikuti AI HANYA bila model benar-benar menjawab;
+          // jika tidak (layanan Python mati), jatuh ke aturan lokal di bagian FALLBACK di bawah.
+          if (modeKontrol == "MANUAL" || aiOk) {
             pompaNyala = resDoc["pumpOn"] | false;
             lampuNyala = resDoc["growlightOn"] | false;
-            digitalWrite(RELAY_PUMP_PIN, pompaNyala ? PUMP_LEVEL_ON : PUMP_LEVEL_OFF);
-            digitalWrite(RELAY_LIGHT_PIN, lampuNyala ? LIGHT_LEVEL_ON : LIGHT_LEVEL_OFF);
+
+            // Pengaman keras (AUTO): jangan menyiram tanah yang sudah basah, apa pun keputusan model.
+            if (modeKontrol == "AUTO" && tanah > BATAS_POMPA_OFF) {
+              pompaNyala = false;
+            }
+            terapkanAktuatorFisik();
+            kontrolServerBerhasil = true;
           }
         }
-        Serial.printf("Telemetri OK! HTTP: %d | Mode Server: %s\n", httpResponseCode, modeKontrol.c_str());
+        Serial.printf("[AIoT OK] HTTP: %d | Mode: %s | AI: %s | Pump: %s | Light: %s | Rule(P/L): %s/%s\n",
+                      httpResponseCode, modeKontrol.c_str(), aiOk ? "OK" : "-",
+                      pompaNyala ? "ON" : "OFF", lampuNyala ? "ON" : "OFF",
+                      pompaRule ? "ON" : "OFF", lampuRule ? "ON" : "OFF");
       } else {
-        Serial.printf("Gagal mengirim data: %s\n", http.errorToString(httpResponseCode).c_str());
+        Serial.printf("[HTTP Error] Kode: %d (%s)\n", httpResponseCode, http.errorToString(httpResponseCode).c_str());
       }
       http.end();
     } else {
-      Serial.println("Wi-Fi terputus, mencoba menghubungkan ulang...");
+      Serial.println("[WiFi] Terputus, mencoba menghubungkan ulang...");
       WiFi.reconnect();
     }
 
-    // 5. PEMBARUAN LCD
+    // 3. FALLBACK LOKAL: Hanya dieksekusi jika gagal mendapat respons dari Server/AI saat mode AUTO
+    if (!kontrolServerBerhasil && modeKontrol == "AUTO") {
+      jalankanFallbackRuleBased();
+      Serial.println("[FALLBACK] AI/server tidak tersedia, menggunakan Rule-Based Lokal ESP32.");
+    }
+
+    // 4. PEMBARUAN LCD
     static bool halamanSatu = true;
     char isiLcd[17];
 
@@ -237,15 +286,16 @@ void loop() {
     } else {
       snprintf(isiLcd, sizeof(isiLcd), "ST:%.1fC UV:%.1f", suhuTanah, uvIndex);
       tampilBaris(0, isiLcd);
-      snprintf(isiLcd, sizeof(isiLcd), "Mode:%s L:%s", modeKontrol.c_str(), lampuNyala ? "ON" : "OFF");
+      snprintf(isiLcd, sizeof(isiLcd), "%s L:%s",
+               kontrolServerBerhasil ? (modeKontrol == "AUTO" ? "AI:AUTO" : "MANUAL") : "FB:RULE",
+               lampuNyala ? "ON" : "OFF");
       tampilBaris(1, isiLcd);
     }
     halamanSatu = !halamanSatu;
 
-    // 6. OUTPUT SERIAL MONITOR
-    Serial.printf("Soil: %d%% (%s), STanah: %.1fC -> Pompa: %s | LDR: %d%%, UV: %.2f -> Lampu: %s | T Udara: %.1fC, H: %.0f%%\n",
-                  tanah, statusTanah(tanah), suhuTanah, pompaNyala ? "ON" : "OFF",
-                  ldrPersen, uvIndex, lampuNyala ? "ON" : "OFF",
+    // 5. OUTPUT SERIAL MONITOR
+    Serial.printf("Sensor -> Soil: %d%% (%s), STanah: %.1fC, LDR: %d%%, UV: %.2f, TUdara: %.1fC, H: %.0f%%\n",
+                  tanah, statusTanah(tanah), suhuTanah, ldrPersen, uvIndex,
                   isnan(suhuUdara) ? 0.0 : suhuUdara, isnan(kelembapan) ? 0.0 : kelembapan);
   }
 }
